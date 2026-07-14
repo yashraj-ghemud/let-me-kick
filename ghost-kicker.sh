@@ -26,6 +26,19 @@ ORIGINAL_INTERFACE=""
 SMART_INTERVAL=2
 
 ################################################################################
+# FUNCTION: validate_mac
+# Validates a MAC address format (XX:XX:XX:XX:XX:XX)
+################################################################################
+validate_mac() {
+    local mac="$1"
+    if [[ "$mac" =~ ^([0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}$ ]]; then
+        return 0
+    else
+        return 1
+    fi
+}
+
+################################################################################
 # FUNCTION: cleanup_handler
 ################################################################################
 cleanup_handler() {
@@ -108,6 +121,8 @@ check_root() {
 # FUNCTION: check_dependencies
 ################################################################################
 check_dependencies() {
+    local missing=()
+
     if ! command -v aircrack-ng &>/dev/null; then
         echo -e "${RED}[✗] Error: aircrack-ng suite not found!${NC}"
         echo ""
@@ -119,9 +134,30 @@ check_dependencies() {
         echo -e "${CYAN}  For Arch Linux:${NC}"
         echo -e "    sudo pacman -S aircrack-ng"
         echo ""
+        missing+=("aircrack-ng")
+    else
+        echo -e "${GREEN}[✓] aircrack-ng suite found.${NC}"
+    fi
+
+    if ! command -v bc &>/dev/null; then
+        echo -e "${RED}[✗] Error: bc (calculator) not found! Required for Flood Mode.${NC}"
+        echo -e "${YELLOW}[i] Install bc:${NC}"
+        echo -e "  sudo apt install bc  |  pkg install bc  |  sudo pacman -S bc"
+        echo ""
+        missing+=("bc")
+    else
+        echo -e "${GREEN}[✓] bc found.${NC}"
+    fi
+
+    if ! command -v iw &>/dev/null; then
+        echo -e "${YELLOW}[⚠]  iw not found (optional - needed for channel setting)${NC}"
+    else
+        echo -e "${GREEN}[✓] iw found.${NC}"
+    fi
+
+    if [ ${#missing[@]} -gt 0 ]; then
         return 1
     fi
-    echo -e "${GREEN}[✓] aircrack-ng suite found.${NC}"
     return 0
 }
 
@@ -273,6 +309,12 @@ disable_monitor_mode() {
     if [ -n "$MONITOR_INTERFACE" ]; then
         echo -e "${YELLOW}[+] Stopping monitor mode on $MONITOR_INTERFACE...${NC}"
         airmon-ng stop "$MONITOR_INTERFACE" >/dev/null 2>&1
+
+        # If we know the original interface, bring it back up
+        if [ -n "$ORIGINAL_INTERFACE" ]; then
+            echo -e "${YELLOW}[+] Bringing up original interface $ORIGINAL_INTERFACE...${NC}"
+            ip link set "$ORIGINAL_INTERFACE" up 2>/dev/null
+        fi
     fi
 
     echo -e "${YELLOW}[+] Restarting network services...${NC}"
@@ -283,7 +325,7 @@ disable_monitor_mode() {
     fi
 
     echo -e "${GREEN}[✓] Monitor mode disabled. Network restored.${NC}"
-    echo -e "${GREEN}[✓] yashraj exiting...${NC}"
+    echo -e "${GREEN}[✓] Exiting...${NC}"
     exit 0
 }
 
@@ -462,7 +504,17 @@ target_specific_attack() {
         1)
             echo ""
             read -p "$(echo -e ${YELLOW}"[>] Enter Target BSSID (AP MAC): "${NC})" target_bssid
+            if ! validate_mac "$target_bssid"; then
+                echo -e "${RED}[✗] Invalid BSSID format. Expected XX:XX:XX:XX:XX:XX${NC}"
+                read -p "$(echo -e ${YELLOW}"[i] Press Enter to continue..."${NC})"
+                return 1
+            fi
             read -p "$(echo -e ${YELLOW}"[>] Enter Client MAC to deauth: "${NC})" client_mac
+            if ! validate_mac "$client_mac"; then
+                echo -e "${RED}[✗] Invalid Client MAC format. Expected XX:XX:XX:XX:XX:XX${NC}"
+                read -p "$(echo -e ${YELLOW}"[i] Press Enter to continue..."${NC})"
+                return 1
+            fi
             ;;
         2)
             if ! parse_csv_clients; then
@@ -512,9 +564,9 @@ target_specific_attack() {
         SMART_INTERVAL=$interval
     fi
 
-    read -p "$(echo -e ${YELLOW}"[>] Target Channel (1-14, required for attack): "${NC})" channel
-    if [[ ! "$channel" =~ ^[0-9]+$ ]] || [ "$channel" -lt 1 ] || [ "$channel" -gt 14 ]; then
-        echo -e "${RED}[✗] Invalid channel. Must be 1-14.${NC}"
+    read -p "$(echo -e ${YELLOW}"[>] Target Channel (1-165, required for attack): "${NC})" channel
+    if [[ ! "$channel" =~ ^[0-9]+$ ]] || [ "$channel" -lt 1 ] || [ "$channel" -gt 165 ]; then
+        echo -e "${RED}[✗] Invalid channel. Must be 1-165 (1-14 for 2.4GHz, 36-165 for 5GHz).${NC}"
         read -p "$(echo -e ${YELLOW}"[i] Press Enter to continue..."${NC})"
         return 1
     fi
@@ -578,6 +630,11 @@ chaos_mode() {
         1)
             echo ""
             read -p "$(echo -e ${YELLOW}"[>] Enter Target BSSID (AP MAC): "${NC})" target_bssid
+            if ! validate_mac "$target_bssid"; then
+                echo -e "${RED}[✗] Invalid BSSID format. Expected XX:XX:XX:XX:XX:XX${NC}"
+                read -p "$(echo -e ${YELLOW}"[i] Press Enter to continue..."${NC})"
+                return 1
+            fi
             ;;
         2)
             # Refresh CSV path
@@ -601,15 +658,16 @@ chaos_mode() {
             local ap_count=0
             while IFS=',' read -r f1 f2 f3 f4 f5 f6 f7 f8 f9 f10 f11 f12 f13 f14 rest; do
                 f1="${f1// /}"
+                f4="${f4// /}"
                 f14="${f14// /}"
                 if [[ "$f1" =~ ^([0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}$ ]]; then
                     ap_count=$((ap_count + 1))
                     local essid="$f14"
                     [ -z "$essid" ] && essid="Hidden Network"
                     echo -e "${GREEN}  [$ap_count] $essid${NC}"
-                    echo -e "${CYAN}      BSSID: $f1${NC}"
+                    echo -e "${CYAN}      BSSID: $f1  |  Channel: $f4${NC}"
                     echo ""
-                    echo "$ap_count|$f1|$essid" >> "$TEMP_DIR/aps.txt"
+                    echo "$ap_count|$f1|$essid|$f4" >> "$TEMP_DIR/aps.txt"
                 fi
             done < "$CSV_FILE"
 
@@ -632,9 +690,11 @@ chaos_mode() {
             target_bssid=$(echo "$selected_ap" | cut -d'|' -f2)
             local target_essid
             target_essid=$(echo "$selected_ap" | cut -d'|' -f3)
+            target_channel=$(echo "$selected_ap" | cut -d'|' -f4)
 
             echo ""
             echo -e "${GREEN}[✓] Target selected: $target_essid ($target_bssid)${NC}"
+            echo -e "${GREEN}[✓] Channel: $target_channel (auto-detected)${NC}"
             ;;
         *)
             echo -e "${RED}[✗] Invalid option.${NC}"
@@ -656,9 +716,9 @@ chaos_mode() {
         channel="$target_channel"
         echo -e "${GREEN}[✓] Using auto-detected channel: $channel${NC}"
     else
-        read -p "$(echo -e ${YELLOW}"[>] Target Channel (1-14, required for attack): "${NC})" channel
-        if [[ ! "$channel" =~ ^[0-9]+$ ]] || [ "$channel" -lt 1 ] || [ "$channel" -gt 14 ]; then
-            echo -e "${RED}[✗] Invalid channel. Must be 1-14.${NC}"
+        read -p "$(echo -e ${YELLOW}"[>] Target Channel (1-165, required for attack): "${NC})" channel
+        if [[ ! "$channel" =~ ^[0-9]+$ ]] || [ "$channel" -lt 1 ] || [ "$channel" -gt 165 ]; then
+            echo -e "${RED}[✗] Invalid channel. Must be 1-165 (1-14 for 2.4GHz, 36-165 for 5GHz).${NC}"
             read -p "$(echo -e ${YELLOW}"[i] Press Enter to continue..."${NC})"
             return 1
         fi
@@ -728,6 +788,11 @@ flood_mode() {
         1)
             echo ""
             read -p "$(echo -e ${YELLOW}"[>] Enter Target BSSID (AP MAC): "${NC})" target_bssid
+            if ! validate_mac "$target_bssid"; then
+                echo -e "${RED}[✗] Invalid BSSID format. Expected XX:XX:XX:XX:XX:XX${NC}"
+                read -p "$(echo -e ${YELLOW}"[i] Press Enter to continue..."${NC})"
+                return 1
+            fi
             ;;
         2)
             # Refresh CSV path
@@ -816,9 +881,9 @@ flood_mode() {
         channel="$target_channel"
         echo -e "${GREEN}[✓] Using auto-detected channel: $channel${NC}"
     else
-        read -p "$(echo -e ${YELLOW}"[>] Target Channel (1-14, required for attack): "${NC})" channel
-        if [[ ! "$channel" =~ ^[0-9]+$ ]] || [ "$channel" -lt 1 ] || [ "$channel" -gt 14 ]; then
-            echo -e "${RED}[✗] Invalid channel. Must be 1-14.${NC}"
+        read -p "$(echo -e ${YELLOW}"[>] Target Channel (1-165, required for attack): "${NC})" channel
+        if [[ ! "$channel" =~ ^[0-9]+$ ]] || [ "$channel" -lt 1 ] || [ "$channel" -gt 165 ]; then
+            echo -e "${RED}[✗] Invalid channel. Must be 1-165 (1-14 for 2.4GHz, 36-165 for 5GHz).${NC}"
             read -p "$(echo -e ${YELLOW}"[i] Press Enter to continue..."${NC})"
             return 1
         fi
@@ -871,7 +936,8 @@ show_menu() {
         echo -e "${CYAN}  [2]${NC} ${GREEN}Scan Networks${NC}"
         echo -e "${CYAN}  [3]${NC} ${GREEN}Target Specific Attack${NC}"
         echo -e "${CYAN}  [4]${NC} ${RED}Chaos Mode (Deauth All Clients)${NC}"
-        echo -e "${CYAN}  [5]${NC} ${YELLOW}Disable Monitor Mode & Exit${NC}"
+        echo -e "${CYAN}  [5]${NC} ${MAGENTA}Flood Mode (Continuous Deauth Flood)${NC}"
+        echo -e "${CYAN}  [6]${NC} ${YELLOW}Disable Monitor Mode & Exit${NC}"
         echo ""
         echo -e "${YELLOW}═════════════════════════════════════════════════════════${NC}"
         echo ""
